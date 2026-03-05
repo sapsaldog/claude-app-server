@@ -90,6 +90,16 @@ export interface Turn {
   created_at: number;
   completed_at?: number;
   error?: string;
+
+  /** Token usage accumulated from stream_event/message_delta events. */
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+  /** Cost in USD reported by the claude CLI. */
+  cost_usd?: number;
 }
 
 // ─── Thread ───────────────────────────────────────────────────────────────────

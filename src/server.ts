@@ -44,6 +44,13 @@ import type {
 } from "./types.js";
 import { BUILTIN_SKILLS } from "./tools.js";
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Flatten a StoredItem for notification: merge {id, created_at} with item contents. */
+function flatItem(si: StoredItem): Record<string, unknown> {
+  return { id: si.id, created_at: si.created_at, ...si.item };
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const SERVER_NAME    = "claude-app-server";
@@ -159,36 +166,41 @@ export class ClaudeAppServer {
   // ── thread/start ───────────────────────────────────────────────────────────
 
   private threadStart(params: unknown): unknown {
-    const p = (params ?? {}) as { cwd?: string; permission_mode?: PermissionMode };
+    const p = (params ?? {}) as { cwd?: string; permission_mode?: PermissionMode; permissionMode?: PermissionMode };
     let cwd = p.cwd ?? process.cwd();
     // Expand ~ to the user's home directory (Node spawn doesn't do this)
     if (cwd === "~") cwd = os.homedir();
     else if (cwd.startsWith("~/")) cwd = os.homedir() + cwd.slice(1);
-    const thread = createThread(cwd, p.permission_mode ?? "default");
+    // Accept both snake_case and camelCase for Codex protocol compatibility
+    const permMode = p.permissionMode ?? p.permission_mode ?? "default";
+    const thread = createThread(cwd, permMode);
     this.threads.set(thread.id, thread);
-    return { thread_id: thread.id, created_at: thread.created_at };
+    // Return nested format for Codex protocol compatibility
+    return { thread: { id: thread.id, created_at: thread.created_at } };
   }
 
   // ── thread/resume ──────────────────────────────────────────────────────────
 
   private threadResume(params: unknown): unknown {
-    const p = params as { thread_id: string };
-    const thread = this.getThread(p.thread_id);
+    const p = params as { thread_id?: string; threadId?: string };
+    const thread = this.getThread(p.threadId ?? p.thread_id ?? "");
     return {
-      thread_id:       thread.id,
-      created_at:      thread.created_at,
-      cwd:             thread.cwd,
-      permission_mode: thread.permission_mode,
-      cli_session_id:  thread.cliSessionId,
-      turns:           thread.turns.map(serializeTurn),
+      thread: {
+        id:              thread.id,
+        created_at:      thread.created_at,
+        cwd:             thread.cwd,
+        permission_mode: thread.permission_mode,
+        cli_session_id:  thread.cliSessionId,
+        turns:           thread.turns.map(serializeTurn),
+      },
     };
   }
 
   // ── thread/fork ────────────────────────────────────────────────────────────
 
   private threadFork(params: unknown): unknown {
-    const p = params as { thread_id: string };
-    const src = this.getThread(p.thread_id);
+    const p = params as { thread_id?: string; threadId?: string };
+    const src = this.getThread(p.threadId ?? p.thread_id ?? "");
 
     if (!src.cliSessionId) {
       throw new RpcException(E.InvalidParams ?? -32602,
@@ -200,20 +212,37 @@ export class ClaudeAppServer {
     forked.forkFrom = { cliSessionId: src.cliSessionId };
     this.threads.set(forked.id, forked);
 
-    return { thread_id: forked.id, forked_from: src.id, created_at: forked.created_at };
+    return { thread: { id: forked.id, forked_from: src.id, created_at: forked.created_at } };
   }
 
   // ── turn/start ─────────────────────────────────────────────────────────────
 
   private async turnStart(params: unknown, conn: ConnectionState): Promise<unknown> {
-    const p = params as { thread_id: string; content: string; model?: string };
-    const thread = this.getThread(p.thread_id);
+    const p = params as {
+      thread_id?: string; threadId?: string;
+      content?: string; input?: Array<{ type: string; text: string }>;
+      model?: string; title?: string;
+    };
+    // Accept both snake_case and camelCase for Codex protocol compatibility
+    const threadId = p.threadId ?? p.thread_id;
+    if (!threadId) throw new RpcException(E.InvalidParams, "thread_id or threadId is required");
+    const thread = this.getThread(threadId);
 
     if (thread.active_turn_id) {
       throw new RpcException(E.TurnBusy, "Thread already has an active turn. Interrupt it first.");
     }
 
-    const turn = createTurn(thread.id, p.content);
+    // Accept both plain string `content` and Codex-style `input` array
+    let userContent = p.content;
+    if (!userContent && Array.isArray(p.input)) {
+      userContent = p.input
+        .filter(i => i.type === "text")
+        .map(i => i.text)
+        .join("\n");
+    }
+    if (!userContent) throw new RpcException(E.InvalidParams, "content or input is required");
+
+    const turn = createTurn(thread.id, userContent);
 
     // Prepend any queued steer content from the last completed turn
     if (turn.steer_queue.length > 0) {
@@ -231,18 +260,19 @@ export class ClaudeAppServer {
         turn.error = String(err);
         turn.completed_at = Date.now();
         thread.active_turn_id = undefined;
-        conn.send(notif("turn/error", { turn_id: turn.id, error: String(err) }));
+        conn.send(notif("turn/failed", { turn_id: turn.id, error: String(err) }));
       });
     });
 
-    return { turn_id: turn.id };
+    // Return nested format for Codex protocol compatibility
+    return { turn: { id: turn.id } };
   }
 
   // ── turn/steer ─────────────────────────────────────────────────────────────
 
   private turnSteer(params: unknown): unknown {
-    const p = params as { thread_id: string; content: string };
-    const thread = this.getThread(p.thread_id);
+    const p = params as { thread_id?: string; threadId?: string; content: string };
+    const thread = this.getThread(p.threadId ?? p.thread_id ?? "");
 
     // Queue for the next turn (active turn's queue, or thread-level queue)
     if (thread.active_turn_id) {
@@ -257,8 +287,8 @@ export class ClaudeAppServer {
   // ── turn/interrupt ─────────────────────────────────────────────────────────
 
   private turnInterrupt(params: unknown): unknown {
-    const p = params as { thread_id: string };
-    const thread = this.getThread(p.thread_id);
+    const p = params as { thread_id?: string; threadId?: string };
+    const thread = this.getThread(p.threadId ?? p.thread_id ?? "");
 
     if (!thread.active_turn_id) {
       throw new RpcException(E.NoActiveTurn, "No active turn to interrupt.");
@@ -283,17 +313,17 @@ export class ClaudeAppServer {
 
   private approvalRespond(params: unknown): unknown {
     const p = params as {
-      thread_id: string;
+      thread_id?: string; threadId?: string;
       approved: boolean;
-      permission_mode?: PermissionMode;
+      permission_mode?: PermissionMode; permissionMode?: PermissionMode;
     };
-    const thread = this.getThread(p.thread_id);
+    const thread = this.getThread(p.threadId ?? p.thread_id ?? "");
 
     if (p.approved) {
       // Upgrade the thread's permission mode for all subsequent turns.
       // Caller can specify exactly which mode; default to "acceptEdits" which
       // auto-approves file writes/edits but still guards arbitrary shell commands.
-      thread.permission_mode = p.permission_mode ?? "acceptEdits";
+      thread.permission_mode = p.permissionMode ?? p.permission_mode ?? "acceptEdits";
     }
 
     return {
@@ -402,12 +432,23 @@ export class ClaudeAppServer {
     turn.completed_at = Date.now();
     thread.active_turn_id = undefined;
 
+    // Build usage with computed total_tokens for the orchestrator
+    const usagePayload = turn.usage ? {
+      ...turn.usage,
+      total_tokens: (turn.usage.input_tokens ?? 0)
+                  + (turn.usage.output_tokens ?? 0)
+                  + (turn.usage.cache_read_input_tokens ?? 0)
+                  + (turn.usage.cache_creation_input_tokens ?? 0),
+    } : undefined;
+
     conn.send(notif("turn/completed", {
       turn_id:      turn.id,
       thread_id:    thread.id,
       status:       turn.status,
       items_count:  turn.items.length,
       completed_at: turn.completed_at,
+      ...(usagePayload  ? { usage: usagePayload }     : {}),
+      ...(turn.cost_usd != null ? { cost_usd: turn.cost_usd } : {}),
     }));
   }
 
@@ -486,7 +527,7 @@ export class ClaudeAppServer {
                 item: { type: "text", text: block.text },
               };
               turn.items.push(item);
-              conn.send(notif("item/created", { turn_id: turn.id, item }));
+              conn.send(notif("item/created", { turn_id: turn.id, item: flatItem(item) }));
               partialText.delete(msgId);
             }
 
@@ -504,7 +545,7 @@ export class ClaudeAppServer {
               item: { type: "thinking", thinking: block.thinking },
             };
             turn.items.push(item);
-            conn.send(notif("item/created", { turn_id: turn.id, item }));
+            conn.send(notif("item/created", { turn_id: turn.id, item: flatItem(item) }));
             partialThink.delete(msgId);
 
           } else if (block.type === "tool_use" && !partial) {
@@ -518,7 +559,7 @@ export class ClaudeAppServer {
               },
             };
             turn.items.push(item);
-            conn.send(notif("item/created", { turn_id: turn.id, item }));
+            conn.send(notif("item/created", { turn_id: turn.id, item: flatItem(item) }));
           }
         }
         break;
@@ -543,8 +584,27 @@ export class ClaudeAppServer {
               },
             };
             turn.items.push(item);
-            conn.send(notif("item/created", { turn_id: turn.id, item }));
+            conn.send(notif("item/created", { turn_id: turn.id, item: flatItem(item) }));
           }
+        }
+        break;
+      }
+
+      // ── stream_event (granular streaming — usage comes via message_delta) ─
+      case "stream_event": {
+        const inner = event.event;
+        if (inner.type === "message_delta" && inner.usage) {
+          // Accumulate usage — message_delta carries cumulative totals per message
+          turn.usage = inner.usage;
+          const total_tokens = (inner.usage.input_tokens ?? 0)
+                             + (inner.usage.output_tokens ?? 0)
+                             + (inner.usage.cache_read_input_tokens ?? 0)
+                             + (inner.usage.cache_creation_input_tokens ?? 0);
+          conn.send(notif("usage/update", {
+            turn_id:   turn.id,
+            thread_id: thread.id,
+            usage:     { ...inner.usage, total_tokens },
+          }));
         }
         break;
       }
@@ -558,6 +618,11 @@ export class ClaudeAppServer {
           turn.status = "error";
           turn.error  = event.error ?? "unknown error";
         }
+
+        // Capture token usage and cost (if result arrives before process is killed)
+        if (event.usage)  turn.usage    = event.usage;
+        if (event.total_cost_usd != null) turn.cost_usd = event.total_cost_usd;
+        else if (event.cost_usd != null)  turn.cost_usd = event.cost_usd;
 
         // Forward permission denials so the client can show approval UI
         if (event.permission_denials && event.permission_denials.length > 0) {
@@ -597,8 +662,17 @@ interface ClaudeMessage {
   content?: ClaudeContentBlock[];
 }
 
+interface ClaudeUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
 type ClaudeStreamEvent =
-  | { type: "system";    subtype: string; session_id?: string; cwd?: string; tools?: string[]; model?: string; permissionMode?: string }
-  | { type: "assistant"; message: ClaudeMessage; is_partial?: boolean; session_id?: string }
-  | { type: "user";      message: ClaudeMessage; session_id?: string }
-  | { type: "result";    subtype: string; session_id?: string; error?: string; result?: string; cost_usd?: number; is_error?: boolean; permission_denials?: { tool_name: string; tool_use_id: string; tool_input?: unknown }[] };
+  | { type: "system";       subtype: string; session_id?: string; cwd?: string; tools?: string[]; model?: string; permissionMode?: string }
+  | { type: "assistant";    message: ClaudeMessage; is_partial?: boolean; session_id?: string }
+  | { type: "user";         message: ClaudeMessage; session_id?: string }
+  | { type: "result";       subtype: string; session_id?: string; error?: string; result?: string; cost_usd?: number; total_cost_usd?: number; is_error?: boolean; permission_denials?: { tool_name: string; tool_use_id: string; tool_input?: unknown }[]; usage?: ClaudeUsage; duration_ms?: number; model?: string; num_turns?: number }
+  | { type: "stream_event"; event: { type: string; usage?: ClaudeUsage; delta?: unknown }; session_id?: string }
+  | { type: "rate_limit_event"; rate_limit_info?: { status?: string; utilization?: number; resetsAt?: number }; session_id?: string };
