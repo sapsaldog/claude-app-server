@@ -53,7 +53,7 @@ function flatItem(si: StoredItem): Record<string, unknown> {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const SERVER_NAME    = "claude-app-server";
+const SERVER_NAME    = "symphony-claude";
 const SERVER_VERSION = "1.0.0";
 
 const AVAILABLE_MODELS = [

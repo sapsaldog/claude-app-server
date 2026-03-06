@@ -52,7 +52,7 @@ export function startStdio(server: ClaudeAppServer): void {
 
   rl.on("close", () => process.exit(0));
 
-  process.stderr.write("[claude-app-server] listening on stdio\n");
+  process.stderr.write("[symphony-claude] listening on stdio\n");
 }
 
 // ─── WebSocket transport ──────────────────────────────────────────────────────
@@ -117,7 +117,7 @@ export function startWebSocket(
 
   httpServer.listen(port, () => {
     process.stderr.write(
-      `[claude-app-server] listening on ${proto}://0.0.0.0:${port}\n`,
+      `[symphony-claude] listening on ${proto}://0.0.0.0:${port}\n`,
     );
   });
 }
