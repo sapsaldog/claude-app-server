@@ -1,11 +1,6 @@
-# claude-app-server
+# symphony-claude
 
-A **JSON-RPC 2.0 server** that wraps **Claude Code** capabilities — the Claude equivalent of the OpenAI Codex App Server.
-
-```
-npm i claude-app-server
-```
-
+A **JSON-RPC 2.0 Claude Code App Server** conforming to the **OpenAI Symphony Codex** protocol spec.
 
 No API key required. Authentication is handled by the `claude` CLI (`claude auth`).
 
@@ -13,39 +8,54 @@ Clients communicate over **stdio** (default) or **WebSocket**, using newline-del
 
 ---
 
+## Install
+
+### Homebrew
+
+```bash
+brew tap sapsaldog/symphony
+brew install symphony-claude
+```
+
+### From source
+
+```bash
+pnpm install
+pnpm run build
+```
+
+---
+
 ## Requirements
 
 - Node.js >= 18
 - [Claude Code CLI](https://claude.ai/code) installed and authenticated (`claude auth`)
-- pnpm
 
 ---
 
 ## Quick start
 
 ```bash
-# Install
-pnpm install
-
-# Build
-pnpm run build
-
 # Start with WebSocket + QR code (recommended)
-claude-app-server start
+symphony-claude start
 
-# Or install globally first
-pnpm install -g .
-claude-app-server start
-claude-app-server start --port 4000
+# Custom port
+symphony-claude start --port 4000
+
+# Plain WebSocket (no TLS)
+symphony-claude start --no-tls
+
+# stdio mode (for piped/programmatic use)
+symphony-claude
 ```
 
 On startup you'll see:
 
 ```
-  claude-app-server  ·  WebSocket
+  symphony-claude  ·  WebSocket (TLS)
   ─────────────────────────────────
-  Local:    ws://localhost:3284?key=AbC123
-  Network:  ws://192.168.x.x:3284
+  Local:    wss://localhost:3284?key=AbC123
+  Network:  wss://192.168.x.x:3284
   Pair Key: AbC123
 
   ▄▄▄ ... QR code ...
@@ -62,26 +72,21 @@ Scan the QR code from any device on the same Wi-Fi to connect.
 
 | Command | Transport | Notes |
 |---------|-----------|-------|
-| `claude-app-server start` | WebSocket :3284 | Shows QR code, binds to all interfaces |
-| `claude-app-server start --port N` | WebSocket :N | Custom port |
-| `claude-app-server start --no-tls` | WebSocket :3284 | Plain `ws://` (no TLS) |
-| `claude-app-server --transport ws` | WebSocket :3284 | No QR code |
-| `claude-app-server --transport ws --no-tls` | WebSocket :3284 | Plain `ws://`, no QR code |
-| `claude-app-server` | stdio | For piped/programmatic use |
+| `symphony-claude start` | WebSocket :3284 | Shows QR code, binds to all interfaces |
+| `symphony-claude start --port N` | WebSocket :N | Custom port |
+| `symphony-claude start --no-tls` | WebSocket :3284 | Plain `ws://` (no TLS) |
+| `symphony-claude --transport ws` | WebSocket :3284 | No QR code |
+| `symphony-claude` | stdio | For piped/programmatic use |
 
 ### `--no-tls`
 
 By default, WebSocket mode uses a self-signed TLS certificate (`wss://`). Pass `--no-tls` to disable TLS and use plain `ws://` instead. This is useful for local development or when TLS is handled by a reverse proxy.
 
-```bash
-claude-app-server start --no-tls
-```
-
 ---
 
 ## Protocol overview
 
-Messages are newline-delimited JSON, following [JSON-RPC 2.0](https://www.jsonrpc.org/specification).
+Messages are newline-delimited JSON, following [JSON-RPC 2.0](https://www.jsonrpc.org/specification). Both `snake_case` and `camelCase` parameter names are accepted for Codex protocol compatibility.
 
 ### Handshake
 
@@ -94,12 +99,12 @@ Messages are newline-delimited JSON, following [JSON-RPC 2.0](https://www.jsonrp
 
 // Server → Client (response)
 { "jsonrpc": "2.0", "result": {
-    "server": { "name": "claude-app-server", "version": "1.0.0" },
+    "server": { "name": "symphony-claude", "version": "1.0.0" },
     "capabilities": { ... }
   }, "id": 1 }
 
 // Server → Client (notification, async)
-{ "jsonrpc": "2.0", "method": "initialized", "params": { "server": "claude-app-server" } }
+{ "jsonrpc": "2.0", "method": "initialized", "params": { "server": "symphony-claude" } }
 ```
 
 ---
@@ -110,17 +115,17 @@ Messages are newline-delimited JSON, following [JSON-RPC 2.0](https://www.jsonrp
 
 | Method | Params | Returns |
 |--------|--------|---------|
-| `thread/start` | `{ cwd?, permission_mode? }` | `{ thread_id, created_at }` |
-| `thread/resume` | `{ thread_id }` | `{ thread_id, turns[], cwd, … }` |
-| `thread/fork` | `{ thread_id }` | `{ thread_id, forked_from, created_at }` |
+| `thread/start` | `{ cwd?, permissionMode? }` | `{ thread: { id, created_at } }` |
+| `thread/resume` | `{ threadId }` | `{ thread: { id, turns[], cwd, … } }` |
+| `thread/fork` | `{ threadId }` | `{ thread: { id, forked_from, created_at } }` |
 
 ### Turn management
 
 | Method | Params | Returns |
 |--------|--------|---------|
-| `turn/start` | `{ thread_id, content, model? }` | `{ turn_id }` |
-| `turn/steer` | `{ thread_id, content }` | `{ turn_id }` |
-| `turn/interrupt` | `{ thread_id }` | `{ turn_id, status }` |
+| `turn/start` | `{ threadId, content, model? }` or `{ threadId, input: [{ type, text }] }` | `{ turn: { id } }` |
+| `turn/steer` | `{ threadId, content }` | `{ turn_id }` |
+| `turn/interrupt` | `{ threadId }` | `{ turn_id, status }` |
 
 `turn/start` returns immediately; the agent streams back **notifications** until `turn/completed`.
 
@@ -129,14 +134,14 @@ Messages are newline-delimited JSON, following [JSON-RPC 2.0](https://www.jsonrp
 | Method | Returns |
 |--------|---------|
 | `model/list` | List of available Claude models |
-| `skills/list` | List of available tools (read_file, bash, …) |
+| `skills/list` | List of available tools (Read, Bash, …) |
 | `app/list` | (stub, always empty) |
 
 ### Approval
 
 | Method | Params | Description |
 |--------|--------|-------------|
-| `approval/respond` | `{ thread_id, approved, permission_mode? }` | Respond to a permission prompt |
+| `approval/respond` | `{ threadId, approved, permissionMode? }` | Respond to a permission prompt |
 
 ---
 
@@ -149,8 +154,10 @@ After `turn/start`, the server streams these notifications:
 | `turn/started` | Turn began |
 | `item/progress` | Streaming text delta — `{ turn_id, delta: { type, text } }` |
 | `item/created` | Item finalized (text, tool_call, tool_result) |
-| `turn/completed` | Turn finished — `{ turn_id, status, items_count, completed_at }` |
-| `turn/error` | Turn failed — `{ turn_id, error }` |
+| `usage/update` | Token usage update — `{ turn_id, usage: { input_tokens, output_tokens, total_tokens } }` |
+| `turn/completed` | Turn finished — `{ turn_id, status, items_count, usage?, cost_usd? }` |
+| `turn/failed` | Turn failed — `{ turn_id, error }` |
+| `turn/permission_denied` | Permission denied — `{ turn_id, denials }` |
 
 ---
 
@@ -167,7 +174,7 @@ After `turn/start`, the server streams these notifications:
 ## Example session (stdio)
 
 ```bash
-node dist/index.js
+symphony-claude
 ```
 
 ```jsonc
@@ -175,10 +182,10 @@ node dist/index.js
 {"jsonrpc":"2.0","method":"initialize","params":{"client":{"name":"demo","version":"1.0"},"cwd":"/tmp/my-project"},"id":1}
 
 // Start a thread
-{"jsonrpc":"2.0","method":"thread/start","params":{"cwd":"/tmp/my-project","permission_mode":"acceptEdits"},"id":2}
+{"jsonrpc":"2.0","method":"thread/start","params":{"cwd":"/tmp/my-project","permissionMode":"acceptEdits"},"id":2}
 
 // Start a turn
-{"jsonrpc":"2.0","method":"turn/start","params":{"thread_id":"<id>","content":"List the files in this project."},"id":3}
+{"jsonrpc":"2.0","method":"turn/start","params":{"threadId":"<id>","content":"List the files in this project."},"id":3}
 ```
 
 ---
@@ -210,7 +217,14 @@ claude --print --output-format stream-json --include-partial-messages
 Default model can be overridden per turn:
 
 ```json
-{ "method": "turn/start", "params": { "thread_id": "…", "content": "…", "model": "claude-haiku-4-5" } }
+{ "method": "turn/start", "params": { "threadId": "…", "content": "…", "model": "claude-haiku-4-5" } }
 ```
 
 Available: `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5`
+
+---
+
+## Related
+
+- [Symphony (fork)](https://github.com/sapsaldog/symphony) — Modified Symphony client for Claude Code integration
+- [Symphony (original)](https://github.com/openai/symphony) — OpenAI's original Symphony
